@@ -4,6 +4,11 @@ jobs:
     scripts: 
       - echo "hallo job"
 
+  - name: failing job
+    image: ubuntu
+    scripts: 
+      - exit 1
+
   - name: job2
     image: ubuntu
     scripts: 

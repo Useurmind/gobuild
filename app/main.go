@@ -1,6 +1,8 @@
 package main
 
 import (
+	"text/tabwriter"
+	"time"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -19,11 +21,17 @@ type BuildJob struct {
 }
 
 func (j *BuildJob) GetEntryPointScriptName() string {
-	return fmt.Sprintf("%s.sh", j.Name)
+	return fmt.Sprintf("%s.sh", strings.ReplaceAll(j.Name, " ", "-"))
 }
 
 type BuildConfig struct {
 	Jobs []BuildJob
+}
+
+type JobStatus struct {
+	Name string
+	Status string
+	Duration string
 }
 
 type BuildContext struct {
@@ -31,6 +39,10 @@ type BuildContext struct {
 	TempFolderName string
 	TempFolder    string
 	DockerWorkDir string
+
+	currentJob string
+	jobStartTime time.Time
+	JobStatus map[string]*JobStatus
 }
 
 func main() {
@@ -54,7 +66,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	buildContext, err := NewBuildContext()
+	buildContext, err := NewBuildContext(buildConfig.Jobs)
 	if err != nil {
 		log.Printf("ERROR: Could not create build context: %v\r\n", err)
 		os.Exit(1)
@@ -63,12 +75,14 @@ func main() {
 	log.Printf("Starting build execution\r\n")
 	err = buildContext.ExecuteBuild(&buildConfig)
 	if err != nil {
-		log.Printf("ERROR: Execution of build configuration %s: %v\r\n", configFile, err)
+		log.Printf("ERROR: Execution failed for build configuration %s: %v\r\n", configFile, err)
+		buildContext.PrintJobStatus()
 		os.Exit(1)
 	}
+	buildContext.PrintJobStatus()
 }
 
-func NewBuildContext() (*BuildContext, error) {
+func NewBuildContext(jobs []BuildJob) (*BuildContext, error) {
 	workDir, err := os.Getwd()
 	if err != nil {
 		return nil, err
@@ -80,6 +94,15 @@ func NewBuildContext() (*BuildContext, error) {
 		TempFolderName: tempFolderName,
 		TempFolder:    path.Join(workDir, tempFolderName),
 		DockerWorkDir: "/var/gobuild",
+		JobStatus: make(map[string]*JobStatus),
+	}
+
+	for _, job := range jobs {
+		buildContext.JobStatus[job.Name] = &JobStatus{
+			Name: job.Name,
+			Status: "NotRun",
+			Duration: "None",
+		}
 	}
 
 	err = os.MkdirAll(buildContext.TempFolder, 666)
@@ -90,21 +113,63 @@ func NewBuildContext() (*BuildContext, error) {
 	return &buildContext, nil
 }
 
+func (c *BuildContext) StartJob(jobName string) {
+	c.currentJob = jobName
+	c.jobStartTime = time.Now()
+}
+
+func (c *BuildContext) FinishJob(status string) {
+	jobStatus := c.JobStatus[c.currentJob]
+
+	jobStatus.Status = status
+	jobStatus.Duration = time.Since(c.jobStartTime).String()
+}
+
+func (c *BuildContext) PrintJobStatus() {
+	
+	LogSeparator()	
+	log.Println()
+	
+	logWriter := &LogWriter{}
+	writer := tabwriter.NewWriter(logWriter, 0, 0, 4, ' ', 0)
+	fmt.Fprintf(writer, "Job\tStatus\tDuration\n")
+	fmt.Fprintf(writer, "---\t------\t--------\n")
+	for _, v := range c.JobStatus {		
+		fmt.Fprintf(writer, "%s\t%s\t%s\n", v.Name, v.Status, v.Duration)
+	}
+	writer.Flush()
+	
+	log.Println()
+	LogSeparator()
+}
+
 func (c *BuildContext) ExecuteBuild(buildConfig *BuildConfig) error {
 	for _, job := range buildConfig.Jobs {
-		log.Printf("Execute job %s\r\n", job.Name)
+		LogSeparator()
+		log.Printf("Execute job: '%s'\r\n", job.Name)
+		log.Println()
 		err := c.ExecuteDockerJob(&job)
+		log.Println()
 		if err != nil {
 			return err
 		}
+		log.Println("SUCCESS!")
 	}
 
 	return nil
 }
 
 func (c *BuildContext) ExecuteDockerJob(job *BuildJob) error {
+	status := "OK"
+	c.StartJob(job.Name)
+	defer func() {
+		c.FinishJob(status)
+	}()
+
+
 	err := c.CreateEntryPointScript(job)
 	if err != nil {
+		status = "EntryPointCreationError"
 		return err
 	}
 
@@ -125,13 +190,16 @@ func (c *BuildContext) ExecuteDockerJob(job *BuildJob) error {
 	dockerCommandText := "docker " + strings.Join(dockerArgs, " ")
 	log.Printf("Executing docker command: %s", dockerCommandText)
 
+	logWriter := &LogWriter{}
+	logWriter.SetDockerJobName(job.Name)
 	dockerCmd := exec.Command("docker", dockerArgs...)
-	dockerCmd.Stdout = LogWriter{ JobName: job.Name }
-	dockerCmd.Stderr = LogWriter{ JobName: job.Name }
+	dockerCmd.Stdout = logWriter
+	dockerCmd.Stderr = logWriter
 	dockerCmd.Env = os.Environ()
 
 	err = dockerCmd.Run()
 	if err != nil {
+		status = "Failed"
 		return err
 	}
 
@@ -146,7 +214,7 @@ func (c *BuildContext) CreateEntryPointScript(job *BuildJob) error {
 	builder.WriteString("#!/bin/sh\n")
 	builder.WriteString("set -e\n")
 
-	builder.WriteString(fmt.Sprintf("echo Switch workdir to %s\n", c.DockerWorkDir))
+	builder.WriteString(fmt.Sprintf("echo /# cd %s\n", c.DockerWorkDir))
 	builder.WriteString(fmt.Sprintf("cd %s\n", c.DockerWorkDir))
 
 	for _, script := range job.Scripts {
@@ -162,4 +230,8 @@ func (c *BuildContext) CreateEntryPointScript(job *BuildJob) error {
 	}
 
 	return nil
+}
+
+func LogSeparator() {
+	log.Println("-------------------------------------------------------------------")
 }
