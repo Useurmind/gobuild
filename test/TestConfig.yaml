@@ -1,0 +1,10 @@
+jobs:
+  - name: job1
+    image: ubuntu
+    scripts: 
+      - echo "hallo job"
+
+  - name: job2
+    image: ubuntu
+    scripts: 
+      - echo "hallo job 2"
