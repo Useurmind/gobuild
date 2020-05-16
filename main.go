@@ -1,8 +1,6 @@
 package main
 
 import (
-	"text/tabwriter"
-	"time"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -10,6 +8,8 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"text/tabwriter"
+	"time"
 
 	"gopkg.in/yaml.v2"
 )
@@ -18,6 +18,7 @@ type BuildJob struct {
 	Name    string
 	Image   string
 	Scripts []string
+	Env     map[string]string
 }
 
 func (j *BuildJob) GetEntryPointScriptName() string {
@@ -25,24 +26,27 @@ func (j *BuildJob) GetEntryPointScriptName() string {
 }
 
 type BuildConfig struct {
+	Env  map[string]string
 	Jobs []BuildJob
 }
 
 type JobStatus struct {
-	Name string
-	Status string
+	Name     string
+	Status   string
 	Duration string
 }
 
 type BuildContext struct {
-	WorkDir       string
-	TempFolderName string
-	TempFolder    string
-	DockerWorkDir string
+	BuildConfig *BuildConfig
 
-	currentJob string
+	WorkDir        string
+	TempFolderName string
+	TempFolder     string
+	DockerWorkDir  string
+
+	currentJob   string
 	jobStartTime time.Time
-	JobStatus map[string]*JobStatus
+	JobStatus    map[string]*JobStatus
 }
 
 func main() {
@@ -65,8 +69,9 @@ func main() {
 		log.Printf("ERROR: Could not parse yaml in config file %s: %v\r\n", configFile, err)
 		os.Exit(1)
 	}
+	log.Printf("Build Config: %s", buildConfig)
 
-	buildContext, err := NewBuildContext(buildConfig.Jobs)
+	buildContext, err := NewBuildContext(&buildConfig)
 	if err != nil {
 		log.Printf("ERROR: Could not create build context: %v\r\n", err)
 		os.Exit(1)
@@ -82,7 +87,7 @@ func main() {
 	buildContext.PrintJobStatus()
 }
 
-func NewBuildContext(jobs []BuildJob) (*BuildContext, error) {
+func NewBuildContext(buildConfig *BuildConfig) (*BuildContext, error) {
 	workDir, err := os.Getwd()
 	if err != nil {
 		return nil, err
@@ -90,17 +95,18 @@ func NewBuildContext(jobs []BuildJob) (*BuildContext, error) {
 	tempFolderName := ".gobuild"
 
 	buildContext := BuildContext{
-		WorkDir:       workDir,
+		BuildConfig: buildConfig,
+		WorkDir:        workDir,
 		TempFolderName: tempFolderName,
-		TempFolder:    path.Join(workDir, tempFolderName),
-		DockerWorkDir: "/var/gobuild",
-		JobStatus: make(map[string]*JobStatus),
+		TempFolder:     path.Join(workDir, tempFolderName),
+		DockerWorkDir:  "/var/gobuild",
+		JobStatus:      make(map[string]*JobStatus),
 	}
 
-	for _, job := range jobs {
+	for _, job := range buildConfig.Jobs {
 		buildContext.JobStatus[job.Name] = &JobStatus{
-			Name: job.Name,
-			Status: "NotRun",
+			Name:     job.Name,
+			Status:   "NotRun",
 			Duration: "None",
 		}
 	}
@@ -126,19 +132,19 @@ func (c *BuildContext) FinishJob(status string) {
 }
 
 func (c *BuildContext) PrintJobStatus() {
-	
-	LogSeparator()	
+
+	LogSeparator()
 	log.Println()
-	
+
 	logWriter := &LogWriter{}
 	writer := tabwriter.NewWriter(logWriter, 0, 0, 4, ' ', 0)
 	fmt.Fprintf(writer, "Job\tStatus\tDuration\n")
 	fmt.Fprintf(writer, "---\t------\t--------\n")
-	for _, v := range c.JobStatus {		
+	for _, v := range c.JobStatus {
 		fmt.Fprintf(writer, "%s\t%s\t%s\n", v.Name, v.Status, v.Duration)
 	}
 	writer.Flush()
-	
+
 	log.Println()
 	LogSeparator()
 }
@@ -165,7 +171,6 @@ func (c *BuildContext) ExecuteDockerJob(job *BuildJob) error {
 	defer func() {
 		c.FinishJob(status)
 	}()
-
 
 	err := c.CreateEntryPointScript(job)
 	if err != nil {
@@ -195,7 +200,12 @@ func (c *BuildContext) ExecuteDockerJob(job *BuildJob) error {
 	dockerCmd := exec.Command("docker", dockerArgs...)
 	dockerCmd.Stdout = logWriter
 	dockerCmd.Stderr = logWriter
-	dockerCmd.Env = os.Environ()
+
+	osEnvMap := GetEnvMap(os.Environ())
+	jobEnv := MergeEnv(osEnvMap, MergeEnv(c.BuildConfig.Env, job.Env))
+	jobEnvArr := GetEnvArray(jobEnv)
+
+	dockerCmd.Env = jobEnvArr
 
 	err = dockerCmd.Run()
 	if err != nil {
@@ -234,4 +244,43 @@ func (c *BuildContext) CreateEntryPointScript(job *BuildJob) error {
 
 func LogSeparator() {
 	log.Println("-------------------------------------------------------------------")
+}
+
+// MergeEnv merges two environments.
+// The resulting environment will contain all variables from both environments.
+// Variables from env2 will overwrite variables from env1.
+func MergeEnv(env1 map[string]string, env2 map[string]string) map[string]string {
+	result := make(map[string]string)
+
+	for k, v := range env1 {
+		result[k] = v
+	}
+
+	for k, v := range env2 {
+		result[k] = v
+	}
+
+	return result
+}
+
+func GetEnvMap(env []string) map[string]string {
+	result := make(map[string]string)
+
+	for _, v := range env {
+		keyVal := strings.Split(v, "=")
+		result[keyVal[0]] = keyVal[1]
+	}
+
+	return result
+}
+
+func GetEnvArray(env map[string]string) []string {
+	result := make([]string, len(env))
+
+	i := 0
+	for k, v := range env {
+		result[i] = fmt.Sprintf("%s=%s", k, v)
+	}
+
+	return result
 }
