@@ -1,5 +1,7 @@
 # gobuild - Multi container builds from the shell
 
+![Go](https://github.com/Useurmind/gobuild/workflows/Go/badge.svg?branch=master)
+
 ## tl;dr
 
 Execute builds with multiple jobs performed in different containers from the shell.
