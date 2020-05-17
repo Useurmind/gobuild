@@ -25,6 +25,10 @@ func (j *BuildJob) GetEntryPointScriptName() string {
 	return fmt.Sprintf("%s.sh", strings.ReplaceAll(j.Name, " ", "-"))
 }
 
+func (j *BuildJob) GetEnvFileName() string {
+	return fmt.Sprintf("%s.env", strings.ReplaceAll(j.Name, " ", "-"))
+}
+
 type BuildConfig struct {
 	Env  map[string]string
 	Jobs []BuildJob
@@ -46,7 +50,7 @@ type BuildContext struct {
 
 	currentJob   string
 	jobStartTime time.Time
-	JobStatus    map[string]*JobStatus
+	JobStatus    []*JobStatus
 }
 
 func main() {
@@ -95,16 +99,16 @@ func NewBuildContext(buildConfig *BuildConfig) (*BuildContext, error) {
 	tempFolderName := ".gobuild"
 
 	buildContext := BuildContext{
-		BuildConfig: buildConfig,
+		BuildConfig:    buildConfig,
 		WorkDir:        workDir,
 		TempFolderName: tempFolderName,
 		TempFolder:     path.Join(workDir, tempFolderName),
 		DockerWorkDir:  "/var/gobuild",
-		JobStatus:      make(map[string]*JobStatus),
+		JobStatus:      make([]*JobStatus, len(buildConfig.Jobs)),
 	}
 
-	for _, job := range buildConfig.Jobs {
-		buildContext.JobStatus[job.Name] = &JobStatus{
+	for i, job := range buildConfig.Jobs {
+		buildContext.JobStatus[i] = &JobStatus{
 			Name:     job.Name,
 			Status:   "NotRun",
 			Duration: "None",
@@ -125,10 +129,14 @@ func (c *BuildContext) StartJob(jobName string) {
 }
 
 func (c *BuildContext) FinishJob(status string) {
-	jobStatus := c.JobStatus[c.currentJob]
+	for _, jobStatus := range c.JobStatus {
+		if jobStatus.Name == c.currentJob {
+			jobStatus.Status = status
+			jobStatus.Duration = time.Since(c.jobStartTime).String()
 
-	jobStatus.Status = status
-	jobStatus.Duration = time.Since(c.jobStartTime).String()
+			return
+		}
+	}
 }
 
 func (c *BuildContext) PrintJobStatus() {
@@ -186,6 +194,10 @@ func (c *BuildContext) ExecuteDockerJob(job *BuildJob) error {
 	dockerArgs = append(dockerArgs, "-v")
 	dockerArgs = append(dockerArgs, fmt.Sprintf("%s:%s", c.WorkDir, c.DockerWorkDir))
 
+	// environment file for the environment variables
+	dockerArgs = append(dockerArgs, "--env-file")
+	dockerArgs = append(dockerArgs, fmt.Sprintf("%s/%s/%s", c.WorkDir, c.TempFolderName, job.GetEnvFileName()))
+
 	// use prepared entry point
 	dockerArgs = append(dockerArgs, "--entrypoint")
 	dockerArgs = append(dockerArgs, fmt.Sprintf("%s/%s/%s", c.DockerWorkDir, c.TempFolderName, job.GetEntryPointScriptName()))
@@ -201,9 +213,15 @@ func (c *BuildContext) ExecuteDockerJob(job *BuildJob) error {
 	dockerCmd.Stdout = logWriter
 	dockerCmd.Stderr = logWriter
 
-	osEnvMap := GetEnvMap(os.Environ())
-	jobEnv := MergeEnv(osEnvMap, MergeEnv(c.BuildConfig.Env, job.Env))
+	// compute the final environment for the docker container and create a file from it
+	osEnv := GetEnvMap(os.Environ())
+	expBuildEnv := ExpandEnv(c.BuildConfig.Env, osEnv)
+	expJobEnv := ExpandEnv(ExpandEnv(job.Env, expBuildEnv), osEnv)
+
+	jobEnv := MergeEnv(expBuildEnv, expJobEnv)
 	jobEnvArr := GetEnvArray(jobEnv)
+
+	c.CreateEnvFile(job, jobEnv)
 
 	dockerCmd.Env = jobEnvArr
 
@@ -242,8 +260,41 @@ func (c *BuildContext) CreateEntryPointScript(job *BuildJob) error {
 	return nil
 }
 
+func (c *BuildContext) CreateEnvFile(job *BuildJob, env map[string]string) error {
+	file := path.Join(c.TempFolder, job.GetEnvFileName())
+
+	builder := strings.Builder{}
+
+	for k, v := range env {
+		builder.WriteString(k)
+		builder.WriteString("=")
+		builder.WriteString(v)
+		builder.WriteString("\r\n")
+	}
+
+	fileContent := builder.String()
+	err := ioutil.WriteFile(file, []byte(fileContent), 666)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func LogSeparator() {
 	log.Println("-------------------------------------------------------------------")
+}
+
+// ExpandEnv expands env with the values from otherEnv.
+func ExpandEnv(env map[string]string, otherEnv map[string]string) map[string]string {
+	result := make(map[string]string)
+
+	for k, v := range env {
+		expandV := os.Expand(v, func (key string) string { return otherEnv[key] })
+		result[k] = expandV
+	}
+
+	return result
 }
 
 // MergeEnv merges two environments.

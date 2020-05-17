@@ -1,14 +1,20 @@
 env:
   VAR1: value 1
-  VAR2: value 2
+  VAR2: value 2 $VAR4
 
 jobs:
   - name: job1
     image: ubuntu
     scripts: 
-      - echo "hallo job VAR1=$VAR1 VAR2=$VAR2 VAR3=$VAR3"
+      - echo "hallo job"
+      - echo "VAR1=$VAR1"
+      - echo "VAR2=$VAR2"
+      - echo "VAR3=$VAR3"
+      - echo "OS=$OS"
+      - echo "VAR5=$VAR5"
     env:
       VAR3: value 3
+      VAR5: $VAR1
 
   - name: failing job
     image: ubuntu
